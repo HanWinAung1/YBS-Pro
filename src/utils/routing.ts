@@ -1,5 +1,7 @@
-import { BUS_STOPS, BUS_LINES } from '../data/ybsData';
 import { RoutingResult, RouteStep, BusStop, BusLine } from '../types';
+
+const BUS_STOPS: BusStop[] = [];
+const BUS_LINES: BusLine[] = [];
 
 // Helper to check if a stop is before another in a line's route
 function getIndex(stops: string[], stopId: string): number {

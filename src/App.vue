@@ -6,13 +6,12 @@ import {
   Map as MapIcon, ChevronRight, Sparkles, Send, Trash2, Clock, Landmark, Check,
   Edit, Tag, X
 } from 'lucide-vue-next';
-import { BUS_STOPS as STATIC_BUS_STOPS, BUS_LINES as STATIC_BUS_LINES, YBS_VEHICLES } from './data/ybsData';
 import { BusLine, BusStop, UserBookmark, RoutingResult } from './types';
 import { findRoutes } from './utils/routing';
 
 // Reactive YBS Cloud Database State
-const BUS_STOPS = ref<BusStop[]>(STATIC_BUS_STOPS);
-const BUS_LINES = ref<BusLine[]>(STATIC_BUS_LINES);
+const BUS_STOPS = ref<BusStop[]>([]);
+const BUS_LINES = ref<BusLine[]>([]);
 
 // UI State
 const currentTab = ref<'planner' | 'lines' | 'stops' | 'assistant'>('planner');

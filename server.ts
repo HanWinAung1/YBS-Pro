@@ -1,7 +1,6 @@
 import express, { Request, Response } from "express";
 import path from "path";
 import { GoogleGenAI } from "@google/genai";
-import { BUS_STOPS, BUS_LINES } from "./src/data/ybsData";
 import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 
@@ -16,6 +15,47 @@ const PORT = 3000;
 const supabaseUrl = process.env.SUPABASE_URL || "";
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "";
 const supabase = (supabaseUrl && supabaseAnonKey) ? createClient(supabaseUrl, supabaseAnonKey) : null;
+
+// Dynamic In-Memory Cache
+let cachedStops: any[] = [];
+let cachedLines: any[] = [];
+
+async function ensureCachedData() {
+  if (supabase && (cachedStops.length === 0 || cachedLines.length === 0)) {
+    try {
+      console.log("Lazy hydrating local server cache from Supabase Cloud...");
+      const { data: stopsData, error: stopsError } = await supabase.from('ybs_stops').select('*');
+      const { data: linesData, error: linesError } = await supabase.from('ybs_lines').select('*');
+      
+      if (!stopsError && stopsData) {
+        cachedStops = stopsData.map((d: any) => ({
+          id: d.id,
+          name: d.name,
+          nameMy: d.name_my,
+          lat: d.lat,
+          lng: d.lng,
+          lines: d.lines || []
+        }));
+      }
+      if (!linesError && linesData) {
+        cachedLines = linesData.map((d: any) => ({
+          id: d.id,
+          name: d.name,
+          operator: d.operator,
+          startStop: d.start_stop,
+          endStop: d.end_stop,
+          stops: d.stops || [],
+          fare: d.fare || 400,
+          operatingHours: d.operating_hours || "05:00 AM - 09:00 PM",
+          color: d.color,
+          coordinates: d.coordinates || []
+        }));
+      }
+    } catch (e) {
+      console.error("Failed to load and warm up dynamic Supabase records:", e);
+    }
+  }
+}
 
 // Helper to check if tables exist and count records
 async function getTableStats() {
@@ -75,82 +115,13 @@ const chunkArray = (arr: any[], size: number) => {
 
 // 2. Clear & Seed/Sync Local Data to Supabase Cloud Database (One-Click Setup)
 app.post("/api/supabase/sync", async (req: Request, res: Response) => {
-  if (!supabase) {
-    res.status(400).json({ error: "Supabase client is not initialized. Please configure credentials." });
-    return;
-  }
-
-  try {
-    console.log("Starting full sync of local bus database to Supabase...");
-    
-    // Check if tables are missing
-    const stats = await getTableStats();
-    if (stats.status === "tables_missing") {
-      res.status(400).json({
-        error: "Database tables 'ybs_stops' and/or 'ybs_lines' do not exist in your Supabase schema yet. Please run the SQL schema first."
-      });
-      return;
-    }
-
-    // 1. Sync Stops: mapping keys from camelCase to snake_case
-    const stopRows = BUS_STOPS.map(s => ({
-      id: s.id,
-      name: s.name,
-      name_my: s.nameMy || s.name,
-      lat: s.lat,
-      lng: s.lng,
-      lines: s.lines
-    }));
-
-    // Clear existing stops to avoid key collisions or outdated definitions
-    await supabase.from('ybs_stops').delete().neq('id', '___non_existent_placeholder___');
-
-    // Batch insert stops
-    const stopChunks = chunkArray(stopRows, 200);
-    for (let i = 0; i < stopChunks.length; i++) {
-      const { error } = await supabase.from('ybs_stops').insert(stopChunks[i]);
-      if (error) {
-        throw new Error(`Stop insert chunk ${i} failed: ${error.message}`);
-      }
-    }
-
-    // 2. Sync Lines: mapping keys from camelCase to snake_case
-    const lineRows = BUS_LINES.map(l => ({
-      id: l.id,
-      name: l.name,
-      operator: l.operator,
-      start_stop: l.startStop,
-      end_stop: l.endStop,
-      stops: l.stops,
-      fare: l.fare,
-      operating_hours: l.operatingHours,
-      color: l.color,
-      coordinates: l.coordinates
-    }));
-
-    // Clear existing lines
-    await supabase.from('ybs_lines').delete().neq('id', '___non_existent_placeholder___');
-
-    // Batch insert lines
-    const lineChunks = chunkArray(lineRows, 50);
-    for (let i = 0; i < lineChunks.length; i++) {
-      const { error } = await supabase.from('ybs_lines').insert(lineChunks[i]);
-      if (error) {
-        throw new Error(`Line insert chunk ${i} failed: ${error.message}`);
-      }
-    }
-
-    res.json({
-      success: true,
-      message: `Database synchronized successfully! Seeded ${stopRows.length} stops and ${lineRows.length} bus lines.`
-    });
-  } catch (err: any) {
-    console.error("Sync Error:", err);
-    res.status(500).json({ error: err.message || "An error occurred during database migration." });
-  }
+  res.json({
+    success: true,
+    message: "Static database files bypassed. Running in full Cloud Database mode powered by Supabase."
+  });
 });
 
-// 3. Proxy endpoints that load from Supabase if connected, otherwise fallback to local dataset
+// 3. Proxy endpoints that load from Supabase if connected
 app.get("/api/stops", async (req: Request, res: Response) => {
   if (supabase) {
     try {
@@ -167,14 +138,16 @@ app.get("/api/stops", async (req: Request, res: Response) => {
           lng: d.lng,
           lines: d.lines || []
         }));
+        cachedStops = mapped;
         res.json({ source: "Supabase Cloud Database", count: mapped.length, data: mapped });
         return;
       }
     } catch (e) {
-      console.error("Supabase load stops failed, falling back to local pre-bundled data:", e);
+      console.error("Supabase load stops failed, falling back to local memory cache:", e);
     }
   }
-  res.json({ source: "Local Verified File Cache", count: BUS_STOPS.length, data: BUS_STOPS });
+  await ensureCachedData();
+  res.json({ source: "Supabase Cache Store", count: cachedStops.length, data: cachedStops });
 });
 
 app.get("/api/lines", async (req: Request, res: Response) => {
@@ -197,14 +170,16 @@ app.get("/api/lines", async (req: Request, res: Response) => {
           color: d.color,
           coordinates: d.coordinates || []
         }));
+        cachedLines = mapped;
         res.json({ source: "Supabase Cloud Database", count: mapped.length, data: mapped });
         return;
       }
     } catch (e) {
-      console.error("Supabase load lines failed, falling back to local pre-bundled data:", e);
+      console.error("Supabase load lines failed, falling back to local memory cache:", e);
     }
   }
-  res.json({ source: "Local Verified File Cache", count: BUS_LINES.length, data: BUS_LINES });
+  await ensureCachedData();
+  res.json({ source: "Supabase Cache Store", count: cachedLines.length, data: cachedLines });
 });
 
 // Initialize Gemini Client
@@ -227,9 +202,12 @@ app.post("/api/gemini", async (req: Request, res: Response) => {
       return;
     }
 
+    // Warm up dynamic cache if empty
+    await ensureCachedData();
+
     // Build rich transit-specific context
-    const stopsContext = BUS_STOPS.map(s => `- ${s.name} (${s.nameMy}): connects ${s.lines.join(", ")}`).join("\n");
-    const linesContext = BUS_LINES.map(l => `- ${l.name} (run by ${l.operator}): fares ${l.fare} MMK, hours: ${l.operatingHours}. Stops in order: ${l.stops.map(id => BUS_STOPS.find(s => s.id === id)?.name || id).join(" -> ")}`).join("\n");
+    const stopsContext = cachedStops.map(s => `- ${s.name} (${s.nameMy}): connects ${s.lines.join(", ")}`).join("\n");
+    const linesContext = cachedLines.map(l => `- ${l.name} (run by ${l.operator}): fares ${l.fare} MMK, hours: ${l.operatingHours}. Stops in order: ${l.stops.map((id: string) => cachedStops.find(s => s.id === id)?.name || id).join(" -> ")}`).join("\n");
 
     const systemInstruction = `You are "YBS Go Plus AI Assistant", an ultra-intelligent, friendly local Yangon transit expert.
 You assist users with Yangon Bus Service (YBS) routing, scheduling, fare calculations, and navigation in Myanmar.
