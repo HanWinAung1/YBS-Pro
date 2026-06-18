@@ -12,8 +12,8 @@ app.use(express.json({ limit: '10mb' })); // ensure bulk sync uploads fit
 const PORT = 3000;
 
 // Initialize Supabase Client dynamically
-const supabaseUrl = process.env.SUPABASE_URL || "";
-const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "";
+const supabaseUrl = process.env.SUPABASE_URL || "https://kttfczzhzpqehjlsktmx.supabase.co";
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt0dGZjenpoenBxZWhqbHNrdG14Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA5NzA5MjEsImV4cCI6MjA5NjU0NjkyMX0.ARIIgP3yD4fG_8AXJwwY7XuIA8j94_-5fUXSoaRAfT4";
 const supabase = (supabaseUrl && supabaseAnonKey) ? createClient(supabaseUrl, supabaseAnonKey) : null;
 
 // Dynamic In-Memory Cache
