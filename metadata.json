@@ -1,0 +1,6 @@
+{
+  "name": "YBS Go Plus",
+  "description": "An advanced Yangon Bus Service helper app with route finding, interactive stops map, timetable listings, Supabase synchronization, and a smart AI routing assistant.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
