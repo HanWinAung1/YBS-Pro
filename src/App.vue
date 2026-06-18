@@ -6,6 +6,7 @@ import {
   Map as MapIcon, ChevronRight, Sparkles, Send, Trash2, Clock, Landmark, Check,
   Edit, Tag, X
 } from 'lucide-vue-next';
+import { createClient } from '@supabase/supabase-js';
 import { BusLine, BusStop, UserBookmark, RoutingResult } from './types';
 import { findRoutes } from './utils/routing';
 
@@ -659,7 +660,15 @@ const handleRefreshData = () => {
   }
 };
 
-// Supabase Integration & Cloud Database State
+// Supabase Integration, Browser-Level Keys & Cloud Database State
+const showCredentialsModal = ref(false);
+const clientSupabaseUrl = ref(localStorage.getItem('YBS_SUPABASE_URL') || '');
+const clientSupabaseAnonKey = ref(localStorage.getItem('YBS_SUPABASE_ANON_KEY') || '');
+const clientSupabaseConnected = ref(false);
+const clientSupabaseError = ref('');
+const isTestingConnection = ref(false);
+const connectionTestSuccess = ref(false);
+
 const supabaseConfigured = ref(false);
 const supabaseStatus = ref<'unconfigured' | 'tables_missing' | 'connected' | 'connection_error'>('unconfigured');
 const supabaseUrlStr = ref('');
@@ -668,7 +677,7 @@ const supabaseLinesCount = ref(0);
 const supabaseErrorMessage = ref('');
 const isSyncingDatabase = ref(false);
 const syncFeedback = ref<{ type: 'success' | 'error' | ''; message: string }>({ type: '', message: '' });
-const dataSourceLabel = ref('Local Verified File Cache');
+const dataSourceLabel = ref('Local Cache');
 
 // Fetch Supabase configuration status from the backend
 const checkSupabaseStatus = async () => {
@@ -686,6 +695,64 @@ const checkSupabaseStatus = async () => {
     supabaseStatus.value = 'connection_error';
     supabaseErrorMessage.value = "Failed to communicate with Express server API.";
   }
+};
+
+// Test browser direct credentials to Supabase
+const testAndSaveClientSupabase = async () => {
+  if (!clientSupabaseUrl.value.trim() || !clientSupabaseAnonKey.value.trim()) {
+    clientSupabaseError.value = "Please fill out both the Supabase URL and the Anon Key.";
+    return;
+  }
+
+  isTestingConnection.value = true;
+  clientSupabaseError.value = '';
+  connectionTestSuccess.value = false;
+
+  try {
+    const client = createClient(clientSupabaseUrl.value.trim(), clientSupabaseAnonKey.value.trim());
+    
+    // Attempt querying the database
+    const { data: stopsCheck, error: stopsErr } = await client.from('ybs_stops').select('id').limit(1);
+    if (stopsErr) throw stopsErr;
+
+    const { data: linesCheck, error: linesErr } = await client.from('ybs_lines').select('id').limit(1);
+    if (linesErr) throw linesErr;
+
+    // Save of verified credentials to browser persistence
+    localStorage.setItem('YBS_SUPABASE_URL', clientSupabaseUrl.value.trim());
+    localStorage.setItem('YBS_SUPABASE_ANON_KEY', clientSupabaseAnonKey.value.trim());
+
+    clientSupabaseConnected.value = true;
+    connectionTestSuccess.value = true;
+
+    // Hydrate tables immediately
+    await loadYBSCloudData();
+
+    setTimeout(() => {
+      showCredentialsModal.value = false;
+      connectionTestSuccess.value = false;
+    }, 1500);
+
+  } catch (err: any) {
+    console.error("Direct browser connection test failed:", err);
+    clientSupabaseConnected.value = false;
+    clientSupabaseError.value = err.message || "Failed to query the database. Please verify your Supabase credentials, internet connection, and database tables.";
+  } finally {
+    isTestingConnection.value = false;
+  }
+};
+
+const clearClientSupabase = () => {
+  localStorage.removeItem('YBS_SUPABASE_URL');
+  localStorage.removeItem('YBS_SUPABASE_ANON_KEY');
+  clientSupabaseUrl.value = '';
+  clientSupabaseAnonKey.value = '';
+  clientSupabaseConnected.value = false;
+  clientSupabaseError.value = '';
+  connectionTestSuccess.value = false;
+  
+  // Reload fallback
+  loadYBSCloudData();
 };
 
 // Clear & seed current local data over to Supabase in batches
@@ -725,6 +792,80 @@ const syncLocalToSupabase = async () => {
 
 // Load dynamic YBS stops and lines if connected to Supabase
 const loadYBSCloudData = async () => {
+  // 1. Direct browser client-side query (Tops priority for Vercel deployment & direct user customization)
+  if (clientSupabaseUrl.value && clientSupabaseAnonKey.value) {
+    try {
+      console.log("Loading live transit schedules directly from user's Supabase instance with full pagination...");
+      const client = createClient(clientSupabaseUrl.value.trim(), clientSupabaseAnonKey.value.trim());
+
+      const fetchAllClientRows = async (tableName: string) => {
+        let allRows: any[] = [];
+        let page = 0;
+        const pageSize = 1000;
+        let hasMore = true;
+        while (hasMore) {
+          const { data, error } = await client
+            .from(tableName)
+            .select('*')
+            .range(page * pageSize, (page + 1) * pageSize - 1);
+          
+          if (error) throw error;
+          if (data && data.length > 0) {
+            allRows.push(...data);
+            if (data.length < pageSize) {
+              hasMore = false;
+            } else {
+              page++;
+            }
+          } else {
+            hasMore = false;
+          }
+        }
+        return allRows;
+      };
+
+      const stopsData = await fetchAllClientRows('ybs_stops');
+      const linesData = await fetchAllClientRows('ybs_lines');
+
+      if (stopsData && stopsData.length > 0) {
+        BUS_STOPS.value = stopsData.map((d: any) => ({
+          id: d.id,
+          name: d.name,
+          nameMy: d.name_my || d.name,
+          lat: d.lat,
+          lng: d.lng,
+          lines: d.lines || []
+        }));
+        clientSupabaseConnected.value = true;
+        dataSourceLabel.value = "Direct Supabase (Browser Client)";
+      }
+
+      if (linesData && linesData.length > 0) {
+        BUS_LINES.value = linesData.map((d: any) => ({
+          id: d.id,
+          name: d.name,
+          operator: d.operator,
+          startStop: d.start_stop,
+          endStop: d.end_stop,
+          stops: d.stops || [],
+          fare: d.fare || 400,
+          operatingHours: d.operating_hours || "05:00 AM - 09:00 PM",
+          color: d.color,
+          coordinates: d.coordinates || []
+        }));
+      }
+
+      // Re-trigger visual map renderer
+      nextTick(() => {
+        renderStopsOnMap();
+      });
+      return;
+    } catch (err) {
+      console.error("Direct browser Supabase query failed, trying fallback API...", err);
+    }
+  }
+
+  // 2. Server-side API endpoint fallback
   try {
     const stopsResponse = await fetch('/api/stops');
     const stopsJson = await stopsResponse.json();
@@ -738,8 +879,13 @@ const loadYBSCloudData = async () => {
     if (linesJson.data && linesJson.data.length > 0) {
       BUS_LINES.value = linesJson.data;
     }
+
+    // Render map
+    nextTick(() => {
+      renderStopsOnMap();
+    });
   } catch (err) {
-    console.error("Error loading live data from API, using pre-compiled cache:", err);
+    console.error("Error loading live data from API:", err);
   }
 };
 
@@ -770,13 +916,13 @@ onMounted(async () => {
         </div>
 
         <!-- Navigation Tabs in Header -->
-        <nav class="flex overflow-x-auto p-1 bg-slate-800 rounded-lg border border-slate-700 max-w-full" id="ybs_top_tabs_navbar">
+        <nav class="flex overflow-x-auto p-1 bg-slate-800 rounded-lg border border-slate-700 max-w-full [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]" id="ybs_top_tabs_navbar">
           <button 
             id="tab_planner_btn"
             @click="currentTab = 'planner'" 
             :class="[
-              'flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold whitespace-nowrap transition-all duration-200',
-              currentTab === 'planner' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-300 hover:text-white hover:bg-slate-750'
+              'flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold whitespace-nowrap transition-all duration-200 cursor-pointer',
+              currentTab === 'planner' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-300 hover:text-white hover:bg-slate-700'
             ]"
           >
             <Navigation2 class="w-3.5 h-3.5" />
@@ -787,8 +933,8 @@ onMounted(async () => {
             id="tab_lines_btn"
             @click="currentTab = 'lines'" 
             :class="[
-              'flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold whitespace-nowrap transition-all duration-200',
-              currentTab === 'lines' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-300 hover:text-white hover:bg-slate-755'
+              'flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold whitespace-nowrap transition-all duration-200 cursor-pointer',
+              currentTab === 'lines' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-300 hover:text-white hover:bg-slate-700'
             ]"
           >
             <BusFront class="w-3.5 h-3.5" />
@@ -799,8 +945,8 @@ onMounted(async () => {
             id="tab_stops_btn"
             @click="currentTab = 'stops'" 
             :class="[
-              'flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold whitespace-nowrap transition-all duration-200',
-              currentTab === 'stops' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-300 hover:text-white hover:bg-slate-755'
+              'flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold whitespace-nowrap transition-all duration-200 cursor-pointer',
+              currentTab === 'stops' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-300 hover:text-white hover:bg-slate-700'
             ]"
           >
             <MapPin class="w-3.5 h-3.5" />
@@ -811,8 +957,8 @@ onMounted(async () => {
             id="tab_assistant_btn"
             @click="currentTab = 'assistant'" 
             :class="[
-              'flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold whitespace-nowrap transition-all duration-200',
-              currentTab === 'assistant' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-300 hover:text-white hover:bg-slate-755'
+              'flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold whitespace-nowrap transition-all duration-200 cursor-pointer',
+              currentTab === 'assistant' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-300 hover:text-white hover:bg-slate-700'
             ]"
           >
             <Sparkles class="w-3.5 h-3.5" />
@@ -821,8 +967,24 @@ onMounted(async () => {
         </nav>
 
         <!-- Status Terminal Indicator Badge -->
-        <div class="hidden items-center gap-4 lg:flex text-right">
-          <div class="flex flex-col items-end">
+        <div class="flex items-center gap-2 md:gap-4 text-right">
+          <!-- Supabase Connection Configurator Toggle Button -->
+          <button 
+            id="configure_supabase_cloud_btn"
+            @click="showCredentialsModal = true"
+            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition duration-200 cursor-pointer shadow-xs active:scale-95"
+            :class="[
+              clientSupabaseConnected 
+                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20' 
+                : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700 hover:border-slate-600 hover:text-white'
+            ]"
+          >
+            <Database class="w-3.5 h-3.5" :class="clientSupabaseConnected ? 'text-emerald-400' : 'text-slate-400'" />
+            <span class="hidden sm:inline">Supabase DB Config</span>
+            <span class="sm:hidden">DB</span>
+          </button>
+
+          <div class="hidden md:flex flex-col items-end">
             <span class="text-xs font-semibold text-slate-200">Admin Terminal</span>
             <span class="text-[10px] text-emerald-400 font-mono">System Status: Active</span>
           </div>
@@ -1654,7 +1816,7 @@ onMounted(async () => {
         <!-- Utility refresh triggers -->
         <div class="flex flex-col sm:flex-row items-center gap-3 w-full md:w-auto justify-between md:justify-end border-t md:border-t-0 border-slate-100 pt-3 md:pt-0">
           <span class="text-[10px] font-mono text-slate-400 italic text-center sm:text-left">
-            Verified with ygnbusdirectory.com • Static Bus Database
+            Powered by Secure Supabase Cloud DB Engine
           </span>
           <button 
             id="refresh_telemetry_footer_btn"
@@ -1664,6 +1826,141 @@ onMounted(async () => {
             <RefreshCw class="w-3.5 h-3.5" />
             RESET VIEWS
           </button>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Beautiful Supabase Credentials Configurator Modal Overlay -->
+    <div 
+      v-if="showCredentialsModal" 
+      class="fixed inset-0 z-[10000] flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4" 
+      id="supabase_credentials_modal_backdrop"
+    >
+      <div 
+        class="bg-white rounded-xl shadow-2xl border border-slate-200 max-w-md w-full overflow-hidden animate-in fade-in zoom-in-95 duration-150 text-left"
+        id="supabase_credentials_modal_panel"
+      >
+        <!-- Modal Header -->
+        <div class="bg-slate-900 text-white px-5 py-4 flex items-center justify-between">
+          <div class="flex items-center gap-2.5">
+            <Database class="w-5 h-5 text-blue-400" />
+            <div>
+              <h3 class="text-sm font-bold tracking-wide">Supabase Database Config</h3>
+              <p class="text-[10px] text-slate-400 font-mono">Connect live cloud datasets dynamically</p>
+            </div>
+          </div>
+          <button 
+            @click="showCredentialsModal = false" 
+            class="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-850 transition cursor-pointer"
+            id="close_supabase_modal_btn"
+          >
+            <X class="w-4 h-4" />
+          </button>
+        </div>
+
+        <!-- Modal Body Content -->
+        <div class="p-5 space-y-4">
+          
+          <!-- Connection Status Card -->
+          <div class="rounded-lg p-3.5 flex items-start gap-3 border text-xs" :class="[
+            clientSupabaseConnected 
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
+              : 'bg-amber-50 border-amber-200 text-amber-800'
+          ]">
+            <MapPin class="w-5 h-5 shrink-0 mt-0.5" :class="clientSupabaseConnected ? 'text-emerald-650' : 'text-amber-600'" />
+            <div class="space-y-0.5">
+              <p class="font-bold">
+                Status: {{ clientSupabaseConnected ? 'Active Cloud Connection' : 'Bypassed / Not Connected' }}
+              </p>
+              <p class="text-[11px] leading-relaxed opacity-90">
+                {{ clientSupabaseConnected 
+                  ? `Your browser is query-connected directly to your Supabase tables. Loaded ${BUS_STOPS.length} stops and ${BUS_LINES.length} line rules.`
+                  : 'Currently relying on default server caches. Provide your Supabase URL and public anon key below to populate your application live.'
+                }}
+              </p>
+            </div>
+          </div>
+
+          <!-- Form Fields -->
+          <div class="space-y-3">
+            <div class="flex flex-col gap-1 text-left">
+              <label class="text-[10px] font-black uppercase text-slate-400 tracking-wider">Supabase API URL</label>
+              <input 
+                id="input_supabase_url"
+                type="text" 
+                v-model="clientSupabaseUrl"
+                placeholder="https://your-project-id.supabase.co"
+                class="w-full bg-slate-50 border border-slate-200 rounded-md py-2 px-3 text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+              />
+            </div>
+            
+            <div class="flex flex-col gap-1 text-left">
+              <label class="text-[10px] font-black uppercase text-slate-400 tracking-wider">Supabase Public Anon Key</label>
+              <input 
+                id="input_supabase_key"
+                type="password" 
+                v-model="clientSupabaseAnonKey"
+                placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                class="w-full bg-slate-50 border border-slate-200 rounded-md py-2 px-3 text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+              />
+            </div>
+          </div>
+
+          <!-- Error Alert Banner -->
+          <div v-if="clientSupabaseError" class="bg-red-50 border border-red-200 rounded-lg p-3 text-xs text-red-800 space-y-1.5 leading-snug">
+            <div class="font-bold flex items-center gap-1.5">
+              <Info class="w-4 h-4 shrink-0" />
+              Connection Failed
+            </div>
+            <p class="text-[11px] opacity-90 font-mono">{{ clientSupabaseError }}</p>
+          </div>
+
+          <!-- Information Help Notes -->
+          <div class="bg-slate-50 border border-slate-150 rounded-lg p-3 text-[11px] text-slate-500 leading-relaxed space-y-1">
+            <p class="font-bold text-slate-705">Requirements for Database Schema:</p>
+            <ul class="list-disc pl-4 space-y-0.5">
+              <li>Must contain table <code class="font-mono bg-slate-100 text-slate-700 px-1 py-0.2 rounded border">ybs_stops</code></li>
+              <li>Must contain table <code class="font-mono bg-slate-100 text-slate-700 px-1 py-0.2 rounded border">ybs_lines</code></li>
+            </ul>
+          </div>
+
+        </div>
+
+        <!-- Modal Footer Actions -->
+        <div class="bg-slate-50 px-5 py-4 border-t border-slate-100 flex items-center justify-between gap-3">
+          <button 
+            type="button"
+            id="clear_supabase_creds_btn"
+            @click="clearClientSupabase"
+            class="px-3.5 py-2 text-xs font-bold text-slate-600 hover:text-red-650 bg-white hover:bg-slate-100 border border-slate-200 rounded-md transition cursor-pointer"
+            :disabled="!clientSupabaseUrl && !clientSupabaseAnonKey"
+          >
+            Disconnect Credentials
+          </button>
+          
+          <div class="flex items-center gap-2">
+            <button 
+              type="button" 
+              id="cancel_supabase_modal_btn"
+              @click="showCredentialsModal = false"
+              class="px-3.5 py-2 text-xs font-bold text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-md transition cursor-pointer"
+            >
+              Cancel
+            </button>
+            
+            <button 
+              type="button"
+              id="save_supabase_creds_btn"
+              @click="testAndSaveClientSupabase"
+              class="px-4 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-md shadow-xs transition flex items-center gap-1.5 cursor-pointer"
+              :disabled="isTestingConnection"
+            >
+              <RefreshCw v-if="isTestingConnection" class="w-3.5 h-3.5 animate-spin" />
+              <Check v-else-if="connectionTestSuccess" class="w-3.5 h-3.5 text-emerald-355" />
+              {{ isTestingConnection ? 'Verifying...' : (connectionTestSuccess ? 'Connected!' : 'Test & Save') }}
+            </button>
+          </div>
         </div>
 
       </div>

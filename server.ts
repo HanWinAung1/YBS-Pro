@@ -12,22 +12,49 @@ app.use(express.json({ limit: '10mb' })); // ensure bulk sync uploads fit
 const PORT = 3000;
 
 // Initialize Supabase Client dynamically
-const supabaseUrl = process.env.SUPABASE_URL || "https://kttfczzhzpqehjlsktmx.supabase.co";
-const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt0dGZjenpoenBxZWhqbHNrdG14Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA5NzA5MjEsImV4cCI6MjA5NjU0NjkyMX0.ARIIgP3yD4fG_8AXJwwY7XuIA8j94_-5fUXSoaRAfT4";
+const supabaseUrl = process.env.SUPABASE_URL || "";
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "";
 const supabase = (supabaseUrl && supabaseAnonKey) ? createClient(supabaseUrl, supabaseAnonKey) : null;
 
 // Dynamic In-Memory Cache
 let cachedStops: any[] = [];
 let cachedLines: any[] = [];
 
+async function fetchAllFromSupabase(tableName: string) {
+  if (!supabase) return [];
+  let allRows: any[] = [];
+  let page = 0;
+  const pageSize = 1000;
+  let hasMore = true;
+  while (hasMore) {
+    const { data, error } = await supabase
+      .from(tableName)
+      .select('*')
+      .range(page * pageSize, (page + 1) * pageSize - 1);
+    
+    if (error) throw error;
+    if (data && data.length > 0) {
+      allRows.push(...data);
+      if (data.length < pageSize) {
+        hasMore = false;
+      } else {
+        page++;
+      }
+    } else {
+      hasMore = false;
+    }
+  }
+  return allRows;
+}
+
 async function ensureCachedData() {
   if (supabase && (cachedStops.length === 0 || cachedLines.length === 0)) {
     try {
-      console.log("Lazy hydrating local server cache from Supabase Cloud...");
-      const { data: stopsData, error: stopsError } = await supabase.from('ybs_stops').select('*');
-      const { data: linesData, error: linesError } = await supabase.from('ybs_lines').select('*');
+      console.log("Lazy hydrating local server cache from Supabase Cloud with full pagination...");
+      const stopsData = await fetchAllFromSupabase('ybs_stops');
+      const linesData = await fetchAllFromSupabase('ybs_lines');
       
-      if (!stopsError && stopsData) {
+      if (stopsData && stopsData.length > 0) {
         cachedStops = stopsData.map((d: any) => ({
           id: d.id,
           name: d.name,
@@ -37,7 +64,7 @@ async function ensureCachedData() {
           lines: d.lines || []
         }));
       }
-      if (!linesError && linesData) {
+      if (linesData && linesData.length > 0) {
         cachedLines = linesData.map((d: any) => ({
           id: d.id,
           name: d.name,
@@ -125,11 +152,9 @@ app.post("/api/supabase/sync", async (req: Request, res: Response) => {
 app.get("/api/stops", async (req: Request, res: Response) => {
   if (supabase) {
     try {
-      const { data, error } = await supabase
-        .from('ybs_stops')
-        .select('*');
+      const data = await fetchAllFromSupabase('ybs_stops');
       
-      if (!error && data && data.length > 0) {
+      if (data && data.length > 0) {
         const mapped = data.map((d: any) => ({
           id: d.id,
           name: d.name,
@@ -153,11 +178,9 @@ app.get("/api/stops", async (req: Request, res: Response) => {
 app.get("/api/lines", async (req: Request, res: Response) => {
   if (supabase) {
     try {
-      const { data, error } = await supabase
-        .from('ybs_lines')
-        .select('*');
+      const data = await fetchAllFromSupabase('ybs_lines');
       
-      if (!error && data && data.length > 0) {
+      if (data && data.length > 0) {
         const mapped = data.map((d: any) => ({
           id: d.id,
           name: d.name,
