@@ -701,6 +701,156 @@ INSTRUCTIONS:
   return textReply;
 };
 
+const performClientSideOpenRouterCall = async (text: string, chatHistory: any[]) => {
+  const apiKey = clientOpenRouterApiKey.value.trim();
+  if (!apiKey) {
+    throw new Error("No OpenRouter API key is configured. Since this app is running in client-only mode (e.g. static host like Vercel), you must provide your own OpenRouter API key inside the configuration panel (Database icon at the top) to fetch direct AI recommendations.");
+  }
+
+  // Build the optimized, compressed context
+  const { linesContext, stopsContext } = buildOptimizedTransitContext(text);
+
+  const systemInstructionText = `You are "YBS Go Plus AI Assistant", an ultra-intelligent, friendly local Yangon transit expert running on OpenRouter.
+You assist users with Yangon Bus Service (YBS) routing, scheduling, fare calculations, and navigation in Myanmar.
+
+You MUST only provide route find recommendations based on the actual, verified bus directory context provided below.
+Do not hallucinate fake bus lines or connections unless you state clearly it is an estimation.
+
+VERIFIED YANGON BUS DIRECTORY DATA:
+
+BUS LINES:
+${linesContext}
+
+BUS STOPS (MAIN INTERCHANGES & HUBS):
+${stopsContext}
+
+INSTRUCTIONS:
+1. Speak in a helpful and conversational tone.
+2. If the user asks in Myanmar (Burmese), answer in Myanmar (Burmese). If they ask in English, answer in English. You can mix both if appropriate.
+3. Suggest the best bus lines, estimated stops, fares, and transfer advice based ONLY on the provided Bus Lines and Stops.
+4. Keep answers clean, readable, and structured. Use bullet points.`;
+
+  const messages = [
+    { role: 'system', content: systemInstructionText }
+  ];
+
+  chatHistory.forEach((ch: any) => {
+    messages.push({
+      role: ch.role === 'assistant' ? 'assistant' : 'user',
+      content: ch.text
+    });
+  });
+
+  messages.push({
+    role: 'user',
+    content: text
+  });
+
+  const url = 'https://openrouter.ai/api/v1/chat/completions';
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+      'HTTP-Referer': window.location.origin,
+      'X-Title': 'YBS Go Plus'
+    },
+    body: JSON.stringify({
+      model: "google/gemini-2.5-flash:free",
+      messages,
+      temperature: 0.7
+    })
+  });
+
+  if (!response.ok) {
+    const errorJson = await response.json().catch(() => ({}));
+    const extError = errorJson?.error?.message || response.statusText;
+    throw new Error(`OpenRouter direct API error: ${extError}`);
+  }
+
+  const result = await response.json();
+  const textReply = result?.choices?.[0]?.message?.content;
+  if (!textReply) {
+    throw new Error("Unable to extract reply text from OpenRouter response layout.");
+  }
+  return textReply;
+};
+
+const performClientSideOpenAICall = async (text: string, chatHistory: any[]) => {
+  const apiKey = clientOpenaiApiKey.value.trim();
+  if (!apiKey) {
+    throw new Error("No OpenAI API key is configured. Since this app is running in client-only mode (e.g. static host like Vercel), you must provide your own OpenAI API key inside the configuration panel (Database icon at the top) to fetch direct AI recommendations.");
+  }
+
+  // Build the optimized, compressed context
+  const { linesContext, stopsContext } = buildOptimizedTransitContext(text);
+
+  const systemInstructionText = `You are "YBS Go Plus AI Assistant", an ultra-intelligent, friendly local Yangon transit expert running on OpenAI.
+You assist users with Yangon Bus Service (YBS) routing, scheduling, fare calculations, and navigation in Myanmar.
+
+You MUST only provide route find recommendations based on the actual, verified bus directory context provided below.
+Do not hallucinate fake bus lines or connections unless you state clearly it is an estimation.
+
+VERIFIED YANGON BUS DIRECTORY DATA:
+
+BUS LINES:
+${linesContext}
+
+BUS STOPS (MAIN INTERCHANGES & HUBS):
+${stopsContext}
+
+INSTRUCTIONS:
+1. Speak in a helpful and conversational tone.
+2. If the user asks in Myanmar (Burmese), answer in Myanmar (Burmese). If they ask in English, answer in English. You can mix both if appropriate.
+3. Suggest the best bus lines, estimated stops, fares, and transfer advice based ONLY on the provided Bus Lines and Stops.
+4. Keep answers clean, readable, and structured. Use bullet points.`;
+
+  const messages = [
+    { role: 'system', content: systemInstructionText }
+  ];
+
+  chatHistory.forEach((ch: any) => {
+    messages.push({
+      role: ch.role === 'assistant' ? 'assistant' : 'user',
+      content: ch.text
+    });
+  });
+
+  messages.push({
+    role: 'user',
+    content: text
+  });
+
+  const url = 'https://api.openai.com/v1/chat/completions';
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      messages,
+      temperature: 0.7
+    })
+  });
+
+  if (!response.ok) {
+    const errorJson = await response.json().catch(() => ({}));
+    const extError = errorJson?.error?.message || response.statusText;
+    throw new Error(`OpenAI direct API error: ${extError}`);
+  }
+
+  const result = await response.json();
+  const textReply = result?.choices?.[0]?.message?.content;
+  if (!textReply) {
+    throw new Error("Unable to extract reply text from OpenAI direct response layout.");
+  }
+  return textReply;
+};
+
 // AI assistant sendMessage proxy
 const handleSendAIMessage = async () => {
   if (!userMessage.value.trim() || isAILoading.value) return;
@@ -726,6 +876,14 @@ const handleSendAIMessage = async () => {
       usedDirectFallback = true;
       providerLabel = "Groq (Llama 3.3)";
       replyText = await performClientSideGroqCall(text, chatHistory);
+    } else if (clientAiProvider.value === 'openrouter') {
+      usedDirectFallback = true;
+      providerLabel = "OpenRouter (Gemini Free)";
+      replyText = await performClientSideOpenRouterCall(text, chatHistory);
+    } else if (clientAiProvider.value === 'openai') {
+      usedDirectFallback = true;
+      providerLabel = "OpenAI (GPT-4o-mini)";
+      replyText = await performClientSideOpenAICall(text, chatHistory);
     } else if (clientAiProvider.value === 'gemini' && clientGeminiApiKey.value.trim()) {
       usedDirectFallback = true;
       providerLabel = "Gemini Direct";
@@ -1080,6 +1238,8 @@ const clientSupabaseUrl = ref(localStorage.getItem('YBS_SUPABASE_URL') || '');
 const clientSupabaseAnonKey = ref(localStorage.getItem('YBS_SUPABASE_ANON_KEY') || '');
 const clientGeminiApiKey = ref(localStorage.getItem('YBS_GEMINI_API_KEY') || '');
 const clientGroqApiKey = ref(localStorage.getItem('YBS_GROQ_API_KEY') || '');
+const clientOpenRouterApiKey = ref(localStorage.getItem('YBS_OPENROUTER_API_KEY') || '');
+const clientOpenaiApiKey = ref(localStorage.getItem('YBS_OPENAI_API_KEY') || '');
 const clientAiProvider = ref(localStorage.getItem('YBS_AI_PROVIDER') || 'gemini');
 const clientSupabaseConnected = ref(false);
 const clientSupabaseError = ref('');
@@ -1128,6 +1288,20 @@ const testAndSaveClientSupabase = async () => {
     localStorage.setItem('YBS_GROQ_API_KEY', clientGroqApiKey.value.trim());
   } else {
     localStorage.removeItem('YBS_GROQ_API_KEY');
+  }
+
+  // Save OpenRouter Key if provided
+  if (clientOpenRouterApiKey.value.trim()) {
+    localStorage.setItem('YBS_OPENROUTER_API_KEY', clientOpenRouterApiKey.value.trim());
+  } else {
+    localStorage.removeItem('YBS_OPENROUTER_API_KEY');
+  }
+
+  // Save OpenAI Key if provided
+  if (clientOpenaiApiKey.value.trim()) {
+    localStorage.setItem('YBS_OPENAI_API_KEY', clientOpenaiApiKey.value.trim());
+  } else {
+    localStorage.removeItem('YBS_OPENAI_API_KEY');
   }
 
   // Save Provider selection
@@ -1191,11 +1365,15 @@ const clearClientSupabase = () => {
   localStorage.removeItem('YBS_SUPABASE_ANON_KEY');
   localStorage.removeItem('YBS_GEMINI_API_KEY');
   localStorage.removeItem('YBS_GROQ_API_KEY');
+  localStorage.removeItem('YBS_OPENROUTER_API_KEY');
+  localStorage.removeItem('YBS_OPENAI_API_KEY');
   localStorage.removeItem('YBS_AI_PROVIDER');
   clientSupabaseUrl.value = '';
   clientSupabaseAnonKey.value = '';
   clientGeminiApiKey.value = '';
   clientGroqApiKey.value = '';
+  clientOpenRouterApiKey.value = '';
+  clientOpenaiApiKey.value = '';
   clientAiProvider.value = 'gemini';
   clientSupabaseConnected.value = false;
   clientSupabaseError.value = '';
@@ -2506,7 +2684,7 @@ onMounted(async () => {
                   :class="[
                     'py-1 text-[10px] font-bold text-center rounded transition-all duration-150 cursor-pointer',
                     clientAiProvider === 'gemini' 
-                      ? 'bg-white text-blue-680 shadow-xs border border-slate-200/50' 
+                      ? 'bg-white text-blue-680 shadow-xs border border-slate-200/50 font-extrabold' 
                       : 'text-slate-500 hover:text-slate-800'
                   ]"
                 >
@@ -2518,16 +2696,40 @@ onMounted(async () => {
                   :class="[
                     'py-1 text-[10px] font-bold text-center rounded transition-all duration-150 cursor-pointer',
                     clientAiProvider === 'groq' 
-                      ? 'bg-white text-violet-680 shadow-xs border border-slate-200/50' 
+                      ? 'bg-white text-violet-680 shadow-xs border border-slate-200/50 font-extrabold' 
                       : 'text-slate-500 hover:text-slate-800'
                   ]"
                 >
-                  Groq AI (Llama 3.3)
+                  Groq AI
+                </button>
+                <button 
+                  type="button"
+                  @click="clientAiProvider = 'openrouter'"
+                  :class="[
+                    'py-1 text-[10px] font-bold text-center rounded transition-all duration-150 cursor-pointer',
+                    clientAiProvider === 'openrouter' 
+                      ? 'bg-white text-orange-680 shadow-xs border border-slate-200/50 font-extrabold' 
+                      : 'text-slate-500 hover:text-slate-800'
+                  ]"
+                >
+                  OpenRouter
+                </button>
+                <button 
+                  type="button"
+                  @click="clientAiProvider = 'openai'"
+                  :class="[
+                    'py-1 text-[10px] font-bold text-center rounded transition-all duration-150 cursor-pointer',
+                    clientAiProvider === 'openai' 
+                      ? 'bg-white text-emerald-680 shadow-xs border border-slate-200/50 font-extrabold' 
+                      : 'text-slate-500 hover:text-slate-800'
+                  ]"
+                >
+                  OpenAI
                 </button>
               </div>
 
               <!-- Gemini Settings -->
-              <div v-if="clientAiProvider === 'gemini'" class="space-y-1.5">
+              <div v-if="clientAiProvider === 'gemini'" class="space-y-1.5 animate-in fade-in duration-100">
                 <label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Gemini API Key</label>
                 <input 
                   id="input_gemini_key"
@@ -2542,7 +2744,7 @@ onMounted(async () => {
               </div>
 
               <!-- Groq Settings -->
-              <div v-else class="space-y-1.5">
+              <div v-else-if="clientAiProvider === 'groq'" class="space-y-1.5 animate-in fade-in duration-100">
                 <label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Groq API Key</label>
                 <input 
                   id="input_groq_key"
@@ -2553,6 +2755,36 @@ onMounted(async () => {
                 />
                 <p class="text-[9px] text-slate-400 leading-normal">
                   Execute supercharged reasoning via Llama-3.3-70b-versatile directly. Get a free Groq key from the <a href="https://console.groq.com/keys" target="_blank" class="text-violet-650 hover:text-violet-700 underline font-extrabold">Groq Console</a>.
+                </p>
+              </div>
+
+              <!-- OpenRouter Settings -->
+              <div v-else-if="clientAiProvider === 'openrouter'" class="space-y-1.5 animate-in fade-in duration-100">
+                <label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">OpenRouter API Key</label>
+                <input 
+                  id="input_openrouter_key"
+                  type="password" 
+                  v-model="clientOpenRouterApiKey"
+                  placeholder="sk-or-v1-..."
+                  class="w-full bg-slate-50 border border-slate-200 rounded-md py-2 px-3 text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-orange-500 font-mono"
+                />
+                <p class="text-[9px] text-slate-400 leading-normal">
+                  Connect to free server endpoints such as <strong class="text-slate-600 font-extrabold">google/gemini-2.5-flash:free</strong>. Create an account and get a free key from the <a href="https://openrouter.ai/keys" target="_blank" class="text-orange-655 hover:text-orange-700 underline font-extrabold">OpenRouter Console</a>.
+                </p>
+              </div>
+
+              <!-- OpenAI Settings -->
+              <div v-else class="space-y-1.5 animate-in fade-in duration-100">
+                <label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">OpenAI API Key</label>
+                <input 
+                  id="input_openai_key"
+                  type="password" 
+                  v-model="clientOpenaiApiKey"
+                  placeholder="sk-proj-..."
+                  class="w-full bg-slate-50 border border-slate-200 rounded-md py-2 px-3 text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500 font-mono"
+                />
+                <p class="text-[9px] text-slate-400 leading-normal">
+                  Direct routing queries through standard <strong class="text-slate-600 font-extrabold">gpt-4o-mini</strong>. Get a developer key from your <a href="https://platform.openai.com/api-keys" target="_blank" class="text-emerald-650 hover:text-emerald-700 underline font-extrabold">OpenAI Developer Console</a>.
                 </p>
               </div>
             </div>
