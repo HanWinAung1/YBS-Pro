@@ -4,7 +4,7 @@ import {
   BusFront, MapPin, Search, Navigation2, MessageSquare, Info, 
   Database, RefreshCw, Bookmark, BookmarkCheck, ArrowRightLeft, 
   Map as MapIcon, ChevronRight, Sparkles, Send, Trash2, Clock, Landmark, Check,
-  Edit, Tag, X
+  Edit, Tag, X, Compass, Crosshair
 } from 'lucide-vue-next';
 import { createClient } from '@supabase/supabase-js';
 import { BusLine, BusStop, UserBookmark, RoutingResult } from './types';
@@ -497,7 +497,8 @@ const handleSendAIMessage = async () => {
     const response = await fetch('/api/gemini', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'x-gemini-key': clientGeminiApiKey.value
       },
       body: JSON.stringify({
         message: text,
@@ -660,10 +661,157 @@ const handleRefreshData = () => {
   }
 };
 
+// User Current Location Tracking & Route Active Stop Checker
+const userLocation = ref<{ lat: number; lng: number; accuracy?: number } | null>(null);
+const trackingLocation = ref(false);
+let userMarker: any = null;
+let userAccuracyCircle: any = null;
+
+const getDistanceInMeters = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+  const R = 6371e3; // Radius of the earth in meters
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = 
+    Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+    Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c; // returns distance in meters
+};
+
+const nearestStopOverall = computed(() => {
+  if (!userLocation.value || BUS_STOPS.value.length === 0) return null;
+  let minDistance = Infinity;
+  let closestStop: BusStop | null = null;
+  
+  BUS_STOPS.value.forEach(stop => {
+    const lat = typeof stop.lat === 'number' ? stop.lat : parseFloat(stop.lat as any);
+    const lng = typeof stop.lng === 'number' ? stop.lng : parseFloat(stop.lng as any);
+    if (isNaN(lat) || !isFinite(lat) || isNaN(lng) || !isFinite(lng)) return;
+    
+    const d = getDistanceInMeters(userLocation.value!.lat, userLocation.value!.lng, lat, lng);
+    if (d < minDistance) {
+      minDistance = d;
+      closestStop = stop;
+    }
+  });
+  
+  return closestStop ? { stop: closestStop, distance: Math.round(minDistance) } : null;
+});
+
+const nearestStopOnRoute = computed(() => {
+  if (!userLocation.value || activeRouteIndex.value === null || !sortedRoutes.value || sortedRoutes.value.length === 0) return null;
+  const stopsSet = activeRouteStops.value;
+  if (!stopsSet || stopsSet.size === 0) return null;
+  
+  let minDistance = Infinity;
+  let closestStop: BusStop | null = null;
+  
+  BUS_STOPS.value.forEach(stop => {
+    if (!stopsSet.has(stop.id)) return;
+    
+    const lat = typeof stop.lat === 'number' ? stop.lat : parseFloat(stop.lat as any);
+    const lng = typeof stop.lng === 'number' ? stop.lng : parseFloat(stop.lng as any);
+    if (isNaN(lat) || !isFinite(lat) || isNaN(lng) || !isFinite(lng)) return;
+    
+    const d = getDistanceInMeters(userLocation.value!.lat, userLocation.value!.lng, lat, lng);
+    if (d < minDistance) {
+      minDistance = d;
+      closestStop = stop;
+    }
+  });
+  
+  return closestStop ? { stop: closestStop, distance: Math.round(minDistance) } : null;
+});
+
+// Update or redraw user pointer
+const updateUserMarkerOnMap = () => {
+  if (!map || !currentL || !userLocation.value) return;
+  
+  const { lat, lng, accuracy } = userLocation.value;
+  
+  if (userMarker) {
+    userMarker.setLatLng([lat, lng]);
+  } else {
+    const userIcon = currentL.divIcon({
+      className: 'user-location-marker-container',
+      html: `
+        <div class="relative flex items-center justify-center w-6 h-6">
+          <div class="absolute w-6 h-6 bg-blue-500 rounded-full opacity-35 animate-ping"></div>
+          <div class="relative w-3.5 h-3.5 bg-blue-600 rounded-full border-2 border-white shadow-md font-sans"></div>
+        </div>
+      `,
+      iconSize: [24, 24],
+      iconAnchor: [12, 12]
+    });
+    
+    userMarker = currentL.marker([lat, lng], { icon: userIcon }).addTo(map);
+    userMarker.bindPopup('<span class="text-xs font-bold font-sans">You are here</span>');
+  }
+
+  if (accuracy) {
+    if (userAccuracyCircle) {
+      userAccuracyCircle.setLatLng([lat, lng]);
+      userAccuracyCircle.setRadius(accuracy);
+    } else {
+      userAccuracyCircle = currentL.circle([lat, lng], {
+        radius: accuracy,
+        color: '#2563eb',
+        fillColor: '#3b82f6',
+        fillOpacity: 0.1,
+        weight: 1
+      }).addTo(map);
+    }
+  }
+};
+
+const panToUserLocation = () => {
+  if (!userLocation.value || !map) return;
+  map.setView([userLocation.value.lat, userLocation.value.lng], 15);
+};
+
+const startLocationTracking = () => {
+  if (!navigator.geolocation) {
+    alert("Geolocation is not supported by your browser.");
+    return;
+  }
+  
+  trackingLocation.value = true;
+  navigator.geolocation.watchPosition(
+    (position) => {
+      userLocation.value = {
+        lat: position.coords.latitude,
+        lng: position.coords.longitude,
+        accuracy: position.coords.accuracy
+      };
+      updateUserMarkerOnMap();
+    },
+    (error) => {
+      console.warn("Geolocation access tracking rejected/timeout:", error);
+      trackingLocation.value = false;
+    },
+    {
+      enableHighAccuracy: true,
+      timeout: 15000,
+      maximumAge: 0
+    }
+  );
+};
+
+const useNearestStopAsStart = () => {
+  const currentNearest = nearestStopOverall.value;
+  if (currentNearest && currentNearest.stop) {
+    startStop.value = currentNearest.stop.id;
+    startSearchQuery.value = currentNearest.stop.name;
+    handleSearchRoute();
+  }
+};
+
 // Supabase Integration, Browser-Level Keys & Cloud Database State
 const showCredentialsModal = ref(false);
 const clientSupabaseUrl = ref(localStorage.getItem('YBS_SUPABASE_URL') || '');
 const clientSupabaseAnonKey = ref(localStorage.getItem('YBS_SUPABASE_ANON_KEY') || '');
+const clientGeminiApiKey = ref(localStorage.getItem('YBS_GEMINI_API_KEY') || '');
 const clientSupabaseConnected = ref(false);
 const clientSupabaseError = ref('');
 const isTestingConnection = ref(false);
@@ -699,8 +847,25 @@ const checkSupabaseStatus = async () => {
 
 // Test browser direct credentials to Supabase
 const testAndSaveClientSupabase = async () => {
+  // Save Gemini Key if provided
+  if (clientGeminiApiKey.value.trim()) {
+    localStorage.setItem('YBS_GEMINI_API_KEY', clientGeminiApiKey.value.trim());
+  } else {
+    localStorage.removeItem('YBS_GEMINI_API_KEY');
+  }
+
+  // If Supabase coordinates are empty but they updated the Gemini Key, save smoothly and exit
+  if (!clientSupabaseUrl.value.trim() && !clientSupabaseAnonKey.value.trim()) {
+    connectionTestSuccess.value = true;
+    setTimeout(() => {
+      showCredentialsModal.value = false;
+      connectionTestSuccess.value = false;
+    }, 1000);
+    return;
+  }
+
   if (!clientSupabaseUrl.value.trim() || !clientSupabaseAnonKey.value.trim()) {
-    clientSupabaseError.value = "Please fill out both the Supabase URL and the Anon Key.";
+    clientSupabaseError.value = "Please complete both Supabase fields or keep both cleared to store Gemini key alone.";
     return;
   }
 
@@ -745,8 +910,10 @@ const testAndSaveClientSupabase = async () => {
 const clearClientSupabase = () => {
   localStorage.removeItem('YBS_SUPABASE_URL');
   localStorage.removeItem('YBS_SUPABASE_ANON_KEY');
+  localStorage.removeItem('YBS_GEMINI_API_KEY');
   clientSupabaseUrl.value = '';
   clientSupabaseAnonKey.value = '';
+  clientGeminiApiKey.value = '';
   clientSupabaseConnected.value = false;
   clientSupabaseError.value = '';
   connectionTestSuccess.value = false;
@@ -1144,6 +1311,113 @@ onMounted(async () => {
               <component :is="isBookmarked('route', `${startStop}->${endStop}`) ? BookmarkCheck : Bookmark" class="w-3.5 h-3.5 text-blue-600" />
               {{ isBookmarked('route', `${startStop}->${endStop}`) ? 'Commute Saved in Favorites' : 'Bookmark this Daily Ride' }}
             </button>
+          </div>
+
+          <!-- User Real-Time Geolocation Tracking & Route Step Inspector -->
+          <div class="p-3.5 rounded-lg border text-xs" :class="[
+            trackingLocation 
+              ? 'bg-blue-50/50 border-blue-200 text-blue-900' 
+              : 'bg-slate-50 border-slate-200 text-slate-700'
+          ]" id="geotracker_status_card">
+            <div class="flex items-center justify-between mb-3 border-b pb-2" :class="trackingLocation ? 'border-blue-100' : 'border-slate-200'">
+              <span class="font-bold uppercase tracking-wider text-[10px] flex items-center gap-1.5" :class="trackingLocation ? 'text-blue-800' : 'text-slate-500'">
+                <Compass class="w-4 h-4" :class="trackingLocation ? 'text-blue-600 animate-spin-slow' : 'text-slate-400'" />
+                GPS location tracker
+              </span>
+              <span v-if="trackingLocation" class="flex h-2 w-2 relative">
+                <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              <span v-else class="text-[9px] text-slate-500 font-mono">Offline</span>
+            </div>
+
+            <!-- Inactive Tracking State -->
+            <div v-if="!trackingLocation" class="space-y-2 text-left">
+              <p class="text-[11px] leading-relaxed text-slate-500">
+                Turn on your GPS locator tool to detect passenger surroundings, locate nearby stations on the map, and track active route progress.
+              </p>
+              <button 
+                id="enable_geotracker_sidebar_btn"
+                @click="startLocationTracking"
+                class="w-full bg-slate-800 hover:bg-slate-700 text-white text-[11px] font-bold py-1.5 rounded flex items-center justify-center gap-1.5 transition cursor-pointer"
+              >
+                📍 Enable GPS Tracker
+              </button>
+            </div>
+
+            <!-- Active Tracking State -->
+            <div v-else class="space-y-3 text-left">
+              <!-- Coordinates debug readouts -->
+              <div v-if="userLocation" class="flex justify-between text-[10px] text-slate-500 font-mono bg-slate-100/50 p-1 rounded">
+                <span>Lat: {{ userLocation.lat.toFixed(5) }}</span>
+                <span>Lng: {{ userLocation.lng.toFixed(5) }}</span>
+                <span v-if="userLocation.accuracy">±{{ Math.round(userLocation.accuracy) }}m</span>
+              </div>
+
+              <!-- Route Specific Active Stop Detector -->
+              <div v-if="activeRouteIndex !== null" class="bg-blue-600 text-white rounded-lg p-3 space-y-2 shadow-xs border border-blue-500">
+                <div class="flex items-center gap-1.5 border-b border-blue-500 pb-1.5">
+                  <Navigation2 class="w-4 h-4 text-white animate-pulse" />
+                  <span class="font-extrabold uppercase text-[9px] tracking-wider text-blue-100">Live Route stop tracker</span>
+                </div>
+                
+                <div v-if="nearestStopOnRoute" class="space-y-1">
+                  <!-- User is on the stop (within 150m) -->
+                  <div v-if="nearestStopOnRoute.distance <= 150" class="flex items-start gap-1.5">
+                    <span class="text-[9px] bg-emerald-500 text-white px-1.5 py-0.5 rounded-full font-sans font-extrabold uppercase animate-pulse">On Stop</span>
+                    <div class="flex-1">
+                      <p class="font-bold text-xs">{{ nearestStopOnRoute.stop.name }}</p>
+                      <p class="text-[10px] text-blue-100 font-medium leading-none">{{ nearestStopOnRoute.stop.nameMy }}</p>
+                    </div>
+                  </div>
+                  <!-- User is approaching / nearby -->
+                  <div v-else class="space-y-0.5">
+                    <p class="text-[10px] text-blue-100">Approaching Stop on your route:</p>
+                    <p class="font-extrabold text-xs text-white">{{ nearestStopOnRoute.stop.name }}</p>
+                    <p class="text-[10px] text-blue-200 mt-0.5 flex items-center gap-1">
+                      <span>🚶 Distance: ~{{ nearestStopOnRoute.distance }} meters</span>
+                    </p>
+                  </div>
+                </div>
+                <div v-else class="text-xs text-blue-200 leading-snug">
+                  Selected route highlighted. Approach any stop of the route path to trace system positions.
+                </div>
+              </div>
+
+              <!-- General Nearest Stop Overall Detector -->
+              <div v-else-if="nearestStopOverall" class="bg-emerald-50/70 border border-emerald-200 text-emerald-900 rounded-lg p-3 space-y-1.5">
+                <div class="flex items-center justify-between">
+                  <span class="font-extrabold uppercase text-[9px] tracking-wider text-emerald-800">Nearest Bus Stop</span>
+                  <span class="text-[9px] font-mono text-emerald-600 font-bold bg-emerald-100 px-1 py-0.2 rounded">Detected</span>
+                </div>
+                <div>
+                  <p class="font-bold text-slate-800 leading-snug">{{ nearestStopOverall.stop.name }}</p>
+                  <p class="text-[10px] text-emerald-700 leading-none mt-0.5">{{ nearestStopOverall.stop.nameMy }}</p>
+                </div>
+                <div class="flex items-center justify-between text-[10px] text-slate-500 pt-1.5 border-t border-emerald-150">
+                  <span>Distance: ~{{ nearestStopOverall.distance }}m</span>
+                  <button 
+                    id="use_nearest_start_btn"
+                    @mousedown="useNearestStopAsStart"
+                    class="text-[9px] font-bold text-blue-600 hover:text-blue-700 hover:underline cursor-pointer"
+                  >
+                    Set as Starting Station
+                  </button>
+                </div>
+              </div>
+
+              <!-- Action triggers -->
+              <div class="flex items-center gap-2 pt-1 border-t border-slate-100">
+                <button 
+                  id="recenter_my_loc_btn"
+                  @click="panToUserLocation"
+                  class="flex-1 bg-white hover:bg-slate-50 text-[10.5px] font-bold py-1 px-2.5 rounded border border-slate-200 text-slate-700 flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
+                >
+                  <Crosshair class="w-3.5 h-3.5 text-blue-600" />
+                  Center to Me
+                </button>
+              </div>
+            </div>
           </div>
 
           <!-- Bookmarks and saved commutes listing (Secure Browser Storage) -->
@@ -1732,16 +2006,44 @@ onMounted(async () => {
             <p class="text-[11px] text-slate-500 mt-0.5 font-sans">Interact with stations on map and analyze routes</p>
           </div>
 
-          <!-- Quick center map action btn -->
-          <button 
-            id="center_map_btn"
-            v-if="map"
-            @click="map.setView([16.82, 96.155], 12)"
-            class="text-[10px] bg-white px-2.5 py-1.5 rounded border border-slate-200 hover:bg-slate-50 text-slate-700 flex items-center gap-1.5 font-bold transition shadow-xs cursor-pointer"
-          >
-            <Navigation2 class="w-3.5 h-3.5 text-blue-600" />
-            Center City View
-          </button>
+          <!-- Location Controls and center actions -->
+          <div class="flex flex-wrap gap-1.5 justify-start sm:justify-end items-center">
+            <!-- Locate user button -->
+            <button 
+              id="locate_user_btn_header"
+              @click="startLocationTracking"
+              :class="[
+                'text-[10px] px-2.5 py-1.5 rounded border flex items-center gap-1.5 font-bold transition shadow-xs cursor-pointer',
+                trackingLocation 
+                  ? 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100/60 font-sans' 
+                  : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50 font-sans'
+              ]"
+            >
+              <Compass class="w-3.5 h-3.5" :class="trackingLocation ? 'text-blue-600 animate-spin-slow' : 'text-slate-400'" />
+              {{ trackingLocation ? 'GPS Tracking Active' : 'Start GPS' }}
+            </button>
+
+            <!-- Recenter pointer -->
+            <button 
+              id="recenter_to_user_btn_header"
+              v-if="userLocation"
+              @click="panToUserLocation"
+              class="text-[10px] bg-white text-slate-700 border border-slate-200 p-1.5 rounded-md hover:bg-slate-50 transition cursor-pointer"
+              title="Pan Map to My Location"
+            >
+              <Crosshair class="w-3.5 h-3.5 text-blue-600 font-sans" />
+            </button>
+
+            <button 
+              id="center_map_btn"
+              v-if="map"
+              @click="map.setView([16.82, 96.155], 12)"
+              class="text-[10px] bg-white px-2.5 py-1.5 rounded border border-slate-200 hover:bg-slate-50 text-slate-700 flex items-center gap-1.5 font-bold transition shadow-xs cursor-pointer"
+            >
+              <Navigation2 class="w-3.5 h-3.5 text-blue-600" />
+              Center City View
+            </button>
+          </div>
         </div>
 
         <!-- LEAFLET MAP WORKSPACE STAGE wrapper container -->
@@ -1904,6 +2206,24 @@ onMounted(async () => {
                 placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
                 class="w-full bg-slate-50 border border-slate-200 rounded-md py-2 px-3 text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
               />
+            </div>
+
+            <!-- Divider Line -->
+            <div class="border-t border-slate-100 my-2 pt-3 flex flex-col gap-1 text-left">
+              <label class="text-[10px] font-black uppercase text-slate-400 tracking-wider flex items-center gap-1">
+                <Sparkles class="w-3 h-3 text-blue-500 animate-pulse" />
+                Gemini Assistant API Key
+              </label>
+              <input 
+                id="input_gemini_key"
+                type="password" 
+                v-model="clientGeminiApiKey"
+                placeholder="AIzaSy..."
+                class="w-full bg-slate-50 border border-slate-200 rounded-md py-2 px-3 text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+              />
+              <p class="text-[9px] text-slate-400 leading-normal mt-0.5">
+                Saved to your browser's secure namespace. Overrides the backend proxy to allow personalized intelligent travel routes.
+              </p>
             </div>
           </div>
 

@@ -205,21 +205,41 @@ app.get("/api/lines", async (req: Request, res: Response) => {
   res.json({ source: "Supabase Cache Store", count: cachedLines.length, data: cachedLines });
 });
 
-// Initialize Gemini Client
-
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
+// Initialize default Gemini Client (for fallback)
+const defaultApiKey = process.env.GEMINI_API_KEY || "";
+const ai = defaultApiKey ? new GoogleGenAI({
+  apiKey: defaultApiKey,
   httpOptions: {
     headers: {
       'User-Agent': 'aistudio-build',
     }
   }
-});
+}) : null;
 
 // AI Transit Router Endpoint
 app.post("/api/gemini", async (req: Request, res: Response) => {
   try {
-    const { message, chatHistory } = req.body;
+    const { message, chatHistory, geminiApiKey } = req.body;
+    const clientKey = (req.headers['x-gemini-key'] as string) || geminiApiKey;
+    
+    // Choose specific backend agent to execute
+    let activeAIInstance = ai;
+    if (clientKey) {
+      activeAIInstance = new GoogleGenAI({
+        apiKey: clientKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          }
+        }
+      });
+    }
+
+    if (!activeAIInstance) {
+      res.status(400).json({ error: "No Gemini API key detected. Please configure GEMINI_API_KEY on the server or provide your custom key in the configuration modal." });
+      return;
+    }
+
     if (!message) {
       res.status(400).json({ error: "Message is required." });
       return;
@@ -263,7 +283,7 @@ INSTRUCTIONS:
       }
     ];
 
-    const response = await ai.models.generateContent({
+    const response = await activeAIInstance.models.generateContent({
       model: "gemini-3.5-flash",
       contents,
       config: {
