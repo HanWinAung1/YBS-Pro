@@ -477,18 +477,94 @@ const handleSelectStop = (stopId: string) => {
   }
 };
 
+const buildOptimizedTransitContext = (text: string) => {
+  const query = text.toLowerCase();
+  
+  // 1. Identify which lines or stops are explicitly named or implied
+  const relevantLines = BUS_LINES.value.filter(l => {
+    const term = l.name.toLowerCase();
+    return query.includes(term) || (l.operator && query.includes(l.operator.toLowerCase()));
+  });
+
+  const relevantStops = BUS_STOPS.value.filter(s => {
+    return query.includes(s.name.toLowerCase()) || (s.nameMy && query.includes(s.nameMy.toLowerCase()));
+  });
+
+  // Find lines connected to any relevant stops
+  const extraLineNamesOrIds = new Set<string>();
+  relevantStops.forEach(s => {
+    if (s.lines) {
+      s.lines.forEach(lineName => extraLineNamesOrIds.add(lineName.toLowerCase()));
+    }
+  });
+
+  // Decide if we should show the full stop itinerary for each bus line
+  // Prioritize manually referenced lines, lines passing through named stops, or basic samples.
+  const linesToDetail = new Set<string>();
+  relevantLines.forEach(l => linesToDetail.add(l.id));
+  
+  BUS_LINES.value.forEach(l => {
+    if (extraLineNamesOrIds.has(l.name.toLowerCase()) || extraLineNamesOrIds.has(l.id.toLowerCase())) {
+      linesToDetail.add(l.id);
+    }
+  });
+
+  // If no lines matched, default to detailing the first 4 lines around the network as helpful reference context
+  const sampleLimit = Math.min(4, BUS_LINES.value.length);
+  for (let i = 0; i < sampleLimit; i++) {
+    if (linesToDetail.size < 4) {
+      linesToDetail.add(BUS_LINES.value[i].id);
+    }
+  }
+
+  // Generate lines context
+  const linesContext = BUS_LINES.value.map(l => {
+    const isFullDetail = linesToDetail.has(l.id);
+    const stopNames = l.stops.map((id: string) => BUS_STOPS.value.find(s => s.id === id)?.name || id);
+    
+    let stopsDescription = "";
+    if (isFullDetail && stopNames.length > 0) {
+      stopsDescription = stopNames.join(" -> ");
+    } else if (stopNames.length > 0) {
+      // Condensed itinerary showing start, midpoints, and end to save massive tokens
+      const first = stopNames[0];
+      const last = stopNames[stopNames.length - 1];
+      if (stopNames.length > 3) {
+        const mid1 = stopNames[Math.floor(stopNames.length / 3)];
+        const mid2 = stopNames[Math.floor((stopNames.length * 2) / 3)];
+        stopsDescription = `${first} -> ${mid1} -> ${mid2} -> ${last} [${stopNames.length} stops total]`;
+      } else {
+        stopsDescription = stopNames.join(" -> ");
+      }
+    } else {
+      stopsDescription = `${l.startStop || 'Start'} -> ${l.endStop || 'End'}`;
+    }
+
+    return `- YBS ${l.name} (${l.operator || 'YUPT'}): fare ${l.fare || 400} MMK, hours: ${l.operatingHours || '05:00 AM - 09:00 PM'}. Route stops sequence: ${stopsDescription}`;
+  }).join("\n");
+
+  // Keep stops context minimal to save token overhead: Only list interchanges/hubs (connecting 2+ lines) or queried stops
+  const filteredStops = BUS_STOPS.value.filter(s => {
+    const isHub = s.lines && s.lines.length >= 2;
+    const isRelevant = relevantStops.some(rs => rs.id === s.id);
+    return isHub || isRelevant;
+  });
+
+  const stopsContext = filteredStops.slice(0, 45).map(s => 
+    `- Stop: ${s.name} (${s.nameMy || ''}) connects: ${s.lines ? s.lines.join(", ") : ''}`
+  ).join("\n");
+
+  return { linesContext, stopsContext };
+};
+
 const performClientSideGeminiCall = async (text: string, chatHistory: any[]) => {
   const apiKey = clientGeminiApiKey.value.trim();
   if (!apiKey) {
     throw new Error("No Gemini API key is configured. Since this app is running in client-only mode (e.g. static host like Vercel), you must provide your own Gemini API key inside the configuration panel (Database icon at the top) to fetch direct AI recommendations.");
   }
 
-  // Build the rich context
-  const stopsContext = BUS_STOPS.value.map(s => `- ${s.name} (${s.nameMy}): connects ${s.lines.join(", ")}`).join("\n");
-  const linesContext = BUS_LINES.value.map(l => {
-    const stopNames = l.stops.map((id: string) => BUS_STOPS.value.find(s => s.id === id)?.name || id).join(" -> ");
-    return `- ${l.name} (run by ${l.operator}): fares ${l.fare} MMK, hours: ${l.operatingHours}. Stops order: ${stopNames}`;
-  }).join("\n");
+  // Build the optimized, compressed context
+  const { linesContext, stopsContext } = buildOptimizedTransitContext(text);
 
   const systemInstructionText = `You are "YBS Go Plus AI Assistant", an ultra-intelligent, friendly local Yangon transit expert.
 You assist users with Yangon Bus Service (YBS) routing, scheduling, fare calculations, and navigation in Myanmar.
@@ -501,7 +577,7 @@ VERIFIED YANGON BUS DIRECTORY DATA:
 BUS LINES:
 ${linesContext}
 
-BUS STOPS:
+BUS STOPS (MAIN INTERCHANGES & HUBS):
 ${stopsContext}
 
 INSTRUCTIONS:
@@ -557,12 +633,8 @@ const performClientSideGroqCall = async (text: string, chatHistory: any[]) => {
     throw new Error("No Groq API key is configured. Since this app is running in client-only mode (e.g. static host like Vercel), you must provide your own Groq API key inside the configuration panel (Database icon at the top) to fetch direct AI recommendations.");
   }
 
-  // Build the rich context
-  const stopsContext = BUS_STOPS.value.map(s => `- ${s.name} (${s.nameMy}): connects ${s.lines.join(", ")}`).join("\n");
-  const linesContext = BUS_LINES.value.map(l => {
-    const stopNames = l.stops.map((id: string) => BUS_STOPS.value.find(s => s.id === id)?.name || id).join(" -> ");
-    return `- ${l.name} (run by ${l.operator}): fares ${l.fare} MMK, hours: ${l.operatingHours}. Stops order: ${stopNames}`;
-  }).join("\n");
+  // Build the optimized, compressed context
+  const { linesContext, stopsContext } = buildOptimizedTransitContext(text);
 
   const systemInstructionText = `You are "YBS Go Plus AI Assistant", an ultra-intelligent, friendly local Yangon transit expert running on Groq (using Llama 3.3).
 You assist users with Yangon Bus Service (YBS) routing, scheduling, fare calculations, and navigation in Myanmar.
@@ -575,7 +647,7 @@ VERIFIED YANGON BUS DIRECTORY DATA:
 BUS LINES:
 ${linesContext}
 
-BUS STOPS:
+BUS STOPS (MAIN INTERCHANGES & HUBS):
 ${stopsContext}
 
 INSTRUCTIONS:
