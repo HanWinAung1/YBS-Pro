@@ -477,6 +477,158 @@ const handleSelectStop = (stopId: string) => {
   }
 };
 
+const performClientSideGeminiCall = async (text: string, chatHistory: any[]) => {
+  const apiKey = clientGeminiApiKey.value.trim();
+  if (!apiKey) {
+    throw new Error("No Gemini API key is configured. Since this app is running in client-only mode (e.g. static host like Vercel), you must provide your own Gemini API key inside the configuration panel (Database icon at the top) to fetch direct AI recommendations.");
+  }
+
+  // Build the rich context
+  const stopsContext = BUS_STOPS.value.map(s => `- ${s.name} (${s.nameMy}): connects ${s.lines.join(", ")}`).join("\n");
+  const linesContext = BUS_LINES.value.map(l => {
+    const stopNames = l.stops.map((id: string) => BUS_STOPS.value.find(s => s.id === id)?.name || id).join(" -> ");
+    return `- ${l.name} (run by ${l.operator}): fares ${l.fare} MMK, hours: ${l.operatingHours}. Stops order: ${stopNames}`;
+  }).join("\n");
+
+  const systemInstructionText = `You are "YBS Go Plus AI Assistant", an ultra-intelligent, friendly local Yangon transit expert.
+You assist users with Yangon Bus Service (YBS) routing, scheduling, fare calculations, and navigation in Myanmar.
+
+You MUST only provide route find recommendations based on the actual, verified bus directory context provided below.
+Do not hallucinate fake bus lines or connections unless you state clearly it is an estimation.
+
+VERIFIED YANGON BUS DIRECTORY DATA:
+
+BUS LINES:
+${linesContext}
+
+BUS STOPS:
+${stopsContext}
+
+INSTRUCTIONS:
+1. Speak in a helpful and conversational tone.
+2. If the user asks in Myanmar (Burmese), answer in Myanmar (Burmese). If they ask in English, answer in English. You can mix both if appropriate.
+3. Suggest the best bus lines, estimated stops, fares, and transfer advice based ONLY on the provided Bus Lines and Stops.
+4. Keep answers clean, readable, and structured. Use bullet points.`;
+
+  const mappedContents = chatHistory.map((ch: any) => ({
+    role: ch.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: ch.text }]
+  }));
+  mappedContents.push({
+    role: 'user',
+    parts: [{ text: text }]
+  });
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      contents: mappedContents,
+      systemInstruction: {
+        parts: [{ text: systemInstructionText }]
+      },
+      generationConfig: {
+        temperature: 0.7
+      }
+    })
+  });
+
+  if (!response.ok) {
+    const errorJson = await response.json().catch(() => ({}));
+    const extError = errorJson?.error?.message || response.statusText;
+    throw new Error(`Google Gemini direct API error: ${extError}`);
+  }
+
+  const result = await response.json();
+  const textReply = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!textReply) {
+    throw new Error("Unable to extract reply text from Gemini direct response layout.");
+  }
+  return textReply;
+};
+
+const performClientSideGroqCall = async (text: string, chatHistory: any[]) => {
+  const apiKey = clientGroqApiKey.value.trim();
+  if (!apiKey) {
+    throw new Error("No Groq API key is configured. Since this app is running in client-only mode (e.g. static host like Vercel), you must provide your own Groq API key inside the configuration panel (Database icon at the top) to fetch direct AI recommendations.");
+  }
+
+  // Build the rich context
+  const stopsContext = BUS_STOPS.value.map(s => `- ${s.name} (${s.nameMy}): connects ${s.lines.join(", ")}`).join("\n");
+  const linesContext = BUS_LINES.value.map(l => {
+    const stopNames = l.stops.map((id: string) => BUS_STOPS.value.find(s => s.id === id)?.name || id).join(" -> ");
+    return `- ${l.name} (run by ${l.operator}): fares ${l.fare} MMK, hours: ${l.operatingHours}. Stops order: ${stopNames}`;
+  }).join("\n");
+
+  const systemInstructionText = `You are "YBS Go Plus AI Assistant", an ultra-intelligent, friendly local Yangon transit expert running on Groq (using Llama 3.3).
+You assist users with Yangon Bus Service (YBS) routing, scheduling, fare calculations, and navigation in Myanmar.
+
+You MUST only provide route find recommendations based on the actual, verified bus directory context provided below.
+Do not hallucinate fake bus lines or connections unless you state clearly it is an estimation.
+
+VERIFIED YANGON BUS DIRECTORY DATA:
+
+BUS LINES:
+${linesContext}
+
+BUS STOPS:
+${stopsContext}
+
+INSTRUCTIONS:
+1. Speak in a helpful and conversational tone.
+2. If the user asks in Myanmar (Burmese), answer in Myanmar (Burmese). If they ask in English, answer in English. You can mix both if appropriate.
+3. Suggest the best bus lines, estimated stops, fares, and transfer advice based ONLY on the provided Bus Lines and Stops.
+4. Keep answers clean, readable, and structured. Use bullet points.`;
+
+  const messages = [
+    { role: 'system', content: systemInstructionText }
+  ];
+
+  chatHistory.forEach((ch: any) => {
+    messages.push({
+      role: ch.role === 'assistant' ? 'assistant' : 'user',
+      content: ch.text
+    });
+  });
+
+  messages.push({
+    role: 'user',
+    content: text
+  });
+
+  const url = 'https://api.groq.com/openai/v1/chat/completions';
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: "llama-3.3-70b-versatile",
+      messages,
+      temperature: 0.7
+    })
+  });
+
+  if (!response.ok) {
+    const errorJson = await response.json().catch(() => ({}));
+    const extError = errorJson?.error?.message || response.statusText;
+    throw new Error(`Groq direct API error: ${extError}`);
+  }
+
+  const result = await response.json();
+  const textReply = result?.choices?.[0]?.message?.content;
+  if (!textReply) {
+    throw new Error("Unable to extract reply text from Groq direct response layout.");
+  }
+  return textReply;
+};
+
 // AI assistant sendMessage proxy
 const handleSendAIMessage = async () => {
   if (!userMessage.value.trim() || isAILoading.value) return;
@@ -494,26 +646,69 @@ const handleSendAIMessage = async () => {
 
   try {
     const chatHistory = assistantMessages.value.slice(0, -1);
-    const response = await fetch('/api/gemini', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-gemini-key': clientGeminiApiKey.value
-      },
-      body: JSON.stringify({
-        message: text,
-        chatHistory
-      })
-    });
+    let replyText = '';
+    let usedDirectFallback = false;
+    let providerLabel = '';
 
-    const data = await response.json();
-    if (response.ok) {
-      assistantMessages.value.push({ role: 'assistant', text: data.reply });
+    if (clientAiProvider.value === 'groq') {
+      usedDirectFallback = true;
+      providerLabel = "Groq (Llama 3.3)";
+      replyText = await performClientSideGroqCall(text, chatHistory);
+    } else if (clientAiProvider.value === 'gemini' && clientGeminiApiKey.value.trim()) {
+      usedDirectFallback = true;
+      providerLabel = "Gemini Direct";
+      replyText = await performClientSideGeminiCall(text, chatHistory);
     } else {
-      assistantMessages.value.push({ role: 'assistant', text: `Sorry, there was a transit calculation error: ${data.error}` });
+      try {
+        const response = await fetch('/api/gemini', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-gemini-key': clientGeminiApiKey.value
+          },
+          body: JSON.stringify({
+            message: text,
+            chatHistory
+          })
+        });
+
+        const contentType = response.headers.get("content-type") || "";
+        if (contentType.includes("text/html") || !response.ok && response.status === 404) {
+          throw new Error("HTML_CONTENT_OR_404_DETECTED");
+        }
+
+        const data = await response.json();
+        if (response.ok) {
+          replyText = data.reply;
+        } else {
+          throw new Error(data.error || "Server endpoint returned error state.");
+        }
+      } catch (routeError: any) {
+        if (
+          routeError.message === "HTML_CONTENT_OR_404_DETECTED" || 
+          routeError.message.includes("is not valid JSON") || 
+          routeError.message.includes("Unexpected token") ||
+          routeError.name === "SyntaxError"
+        ) {
+          console.warn("Express backend endpoint unaccessible or returning HTML. Switching to client fallback system...");
+          usedDirectFallback = true;
+          providerLabel = "Gemini Fallback";
+          replyText = await performClientSideGeminiCall(text, chatHistory);
+        } else {
+          throw routeError;
+        }
+      }
     }
+
+    assistantMessages.value.push({ 
+      role: 'assistant', 
+      text: replyText + (usedDirectFallback ? `\n\n*(Sent via Direct-to-${providerLabel} Client Fallback Mode)*` : '')
+    });
   } catch (error: any) {
-    assistantMessages.value.push({ role: 'assistant', text: `Network query error. Ensure key matches in configuration pane. Error: ${error.message}` });
+    assistantMessages.value.push({ 
+      role: 'assistant', 
+      text: `Sorry, there was an AI routing error. If this app is deployed as a static page (e.g. Vercel), make sure you've added your active API key in the Database Config modal (top header). \n\nDetails: ${error.message}` 
+    });
   } finally {
     isAILoading.value = false;
     await nextTick();
@@ -812,6 +1007,8 @@ const showCredentialsModal = ref(false);
 const clientSupabaseUrl = ref(localStorage.getItem('YBS_SUPABASE_URL') || '');
 const clientSupabaseAnonKey = ref(localStorage.getItem('YBS_SUPABASE_ANON_KEY') || '');
 const clientGeminiApiKey = ref(localStorage.getItem('YBS_GEMINI_API_KEY') || '');
+const clientGroqApiKey = ref(localStorage.getItem('YBS_GROQ_API_KEY') || '');
+const clientAiProvider = ref(localStorage.getItem('YBS_AI_PROVIDER') || 'gemini');
 const clientSupabaseConnected = ref(false);
 const clientSupabaseError = ref('');
 const isTestingConnection = ref(false);
@@ -854,7 +1051,17 @@ const testAndSaveClientSupabase = async () => {
     localStorage.removeItem('YBS_GEMINI_API_KEY');
   }
 
-  // If Supabase coordinates are empty but they updated the Gemini Key, save smoothly and exit
+  // Save Groq Key if provided
+  if (clientGroqApiKey.value.trim()) {
+    localStorage.setItem('YBS_GROQ_API_KEY', clientGroqApiKey.value.trim());
+  } else {
+    localStorage.removeItem('YBS_GROQ_API_KEY');
+  }
+
+  // Save Provider selection
+  localStorage.setItem('YBS_AI_PROVIDER', clientAiProvider.value);
+
+  // If Supabase coordinates are empty but they updated the AI Keys, save smoothly and exit
   if (!clientSupabaseUrl.value.trim() && !clientSupabaseAnonKey.value.trim()) {
     connectionTestSuccess.value = true;
     setTimeout(() => {
@@ -865,7 +1072,7 @@ const testAndSaveClientSupabase = async () => {
   }
 
   if (!clientSupabaseUrl.value.trim() || !clientSupabaseAnonKey.value.trim()) {
-    clientSupabaseError.value = "Please complete both Supabase fields or keep both cleared to store Gemini key alone.";
+    clientSupabaseError.value = "Please complete both Supabase fields or keep both cleared to store AI keys alone.";
     return;
   }
 
@@ -911,9 +1118,13 @@ const clearClientSupabase = () => {
   localStorage.removeItem('YBS_SUPABASE_URL');
   localStorage.removeItem('YBS_SUPABASE_ANON_KEY');
   localStorage.removeItem('YBS_GEMINI_API_KEY');
+  localStorage.removeItem('YBS_GROQ_API_KEY');
+  localStorage.removeItem('YBS_AI_PROVIDER');
   clientSupabaseUrl.value = '';
   clientSupabaseAnonKey.value = '';
   clientGeminiApiKey.value = '';
+  clientGroqApiKey.value = '';
+  clientAiProvider.value = 'gemini';
   clientSupabaseConnected.value = false;
   clientSupabaseError.value = '';
   connectionTestSuccess.value = false;
@@ -2209,21 +2420,69 @@ onMounted(async () => {
             </div>
 
             <!-- Divider Line -->
-            <div class="border-t border-slate-100 my-2 pt-3 flex flex-col gap-1 text-left">
+            <div class="border-t border-slate-100 my-2 pt-3 flex flex-col gap-2.5 text-left">
               <label class="text-[10px] font-black uppercase text-slate-400 tracking-wider flex items-center gap-1">
                 <Sparkles class="w-3 h-3 text-blue-500 animate-pulse" />
-                Gemini Assistant API Key
+                AI Assistant Core Settings
               </label>
-              <input 
-                id="input_gemini_key"
-                type="password" 
-                v-model="clientGeminiApiKey"
-                placeholder="AIzaSy..."
-                class="w-full bg-slate-50 border border-slate-200 rounded-md py-2 px-3 text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
-              />
-              <p class="text-[9px] text-slate-400 leading-normal mt-0.5">
-                Saved to your browser's secure namespace. Overrides the backend proxy to allow personalized intelligent travel routes.
-              </p>
+
+              <!-- Choice selector toggle -->
+              <div class="grid grid-cols-2 gap-1 bg-slate-100 p-0.5 rounded-md border border-slate-200/50">
+                <button 
+                  type="button"
+                  @click="clientAiProvider = 'gemini'"
+                  :class="[
+                    'py-1 text-[10px] font-bold text-center rounded transition-all duration-150 cursor-pointer',
+                    clientAiProvider === 'gemini' 
+                      ? 'bg-white text-blue-680 shadow-xs border border-slate-200/50' 
+                      : 'text-slate-500 hover:text-slate-800'
+                  ]"
+                >
+                  Google Gemini
+                </button>
+                <button 
+                  type="button"
+                  @click="clientAiProvider = 'groq'"
+                  :class="[
+                    'py-1 text-[10px] font-bold text-center rounded transition-all duration-150 cursor-pointer',
+                    clientAiProvider === 'groq' 
+                      ? 'bg-white text-violet-680 shadow-xs border border-slate-200/50' 
+                      : 'text-slate-500 hover:text-slate-800'
+                  ]"
+                >
+                  Groq AI (Llama 3.3)
+                </button>
+              </div>
+
+              <!-- Gemini Settings -->
+              <div v-if="clientAiProvider === 'gemini'" class="space-y-1.5">
+                <label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Gemini API Key</label>
+                <input 
+                  id="input_gemini_key"
+                  type="password" 
+                  v-model="clientGeminiApiKey"
+                  placeholder="AIzaSy..."
+                  class="w-full bg-slate-50 border border-slate-200 rounded-md py-2 px-3 text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                />
+                <p class="text-[9px] text-slate-400 leading-normal">
+                  Saved securely in your browser's local namespace. Overrides the backend proxy to allow direct AI travel recommendations. Get a free API key from the <a href="https://aistudio.google.com/app/apikey" target="_blank" class="text-blue-650 hover:text-blue-700 underline font-extrabold">Google AI Studio Console</a>.
+                </p>
+              </div>
+
+              <!-- Groq Settings -->
+              <div v-else class="space-y-1.5">
+                <label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Groq API Key</label>
+                <input 
+                  id="input_groq_key"
+                  type="password" 
+                  v-model="clientGroqApiKey"
+                  placeholder="gsk_..."
+                  class="w-full bg-slate-50 border border-slate-200 rounded-md py-2 px-3 text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-violet-500 font-mono"
+                />
+                <p class="text-[9px] text-slate-400 leading-normal">
+                  Execute supercharged reasoning via Llama-3.3-70b-versatile directly. Get a free Groq key from the <a href="https://console.groq.com/keys" target="_blank" class="text-violet-650 hover:text-violet-700 underline font-extrabold">Groq Console</a>.
+                </p>
+              </div>
             </div>
           </div>
 
